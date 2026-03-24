@@ -10,7 +10,7 @@ TELEGRAM_BOT_TOKEN = "8625780354:AAG4H0wF-w2-xy--Lh_0ng8cEvORE15Ayxg"
 TELEGRAM_CHAT_ID = "8530883329"
 
 TARGET_FILE = "TARGET_LIST.txt"
-CHECK_INTERVAL = 10  # Jak często sprawdzamy (w sekundach)
+CHECK_INTERVAL = 0.5  # Oczekaj pół sekundy by nasłuchiwać jak szalony bez bana
 
 # Pamięć podręczna, żeby nie wysyłać powiadomień o starych transakcjach
 seen_signatures = set()
@@ -24,20 +24,25 @@ def load_targets():
         targets = [line.split()[0].strip() for line in f if line.strip() and not line.startswith('#')]
     return targets
 
-def send_telegram_alert(wallet, tx_type, signature, description):
+def send_telegram_alert(wallet, tx_type, signature, description, token_ca=""):
     """Wysyła sformatowany alert na Twój telefon"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
     # Skrócony adres dla czytelności
     short_wallet = f"{wallet[:4]}...{wallet[-4:]}"
     
+    # Formatowanie szybkiego zakupu jeśli system złapie kontrakt Tokena!
+    padre_link = f"https://trade.padre.gg/trade/{token_ca}" if token_ca else "https://trade.padre.gg/"
+    ca_text = f"💎 <b>Token CA:</b> <code>{token_ca}</code>\n" if token_ca else ""
+    
     message = (
         f"🚨 <b>CEL ZAAKTYWOWANY!</b> 🚨\n\n"
         f"👤 <b>Portfel:</b> <code>{wallet}</code>\n"
         f"⚡ <b>Akcja:</b> {tx_type}\n"
+        f"{ca_text}"
         f"📝 <b>Szczegóły:</b> {description}\n\n"
         f"🔗 <a href='https://solscan.io/tx/{signature}'>Sprawdź na Solscan</a>\n"
-        f"🦅 <a href='https://trade.padre.gg/'>Otwórz Padre.gg</a>"
+        f"🦅 <a href='{padre_link}'>Otwórz szybkie kupno (Padre)</a>"
     )
     
     payload = {
@@ -77,14 +82,43 @@ def check_wallet_activity(wallet, is_prefill=False):
             tx_type = tx.get("type")
             source = tx.get("source", "")
             
-            # Filtrujemy szum: Szukamy transakcji na giełdach (Raydium, Pump.fun)
-            if tx_type == "SWAP" or source in ["RAYDIUM", "PUMP_FUN"]:
+            # Filtrujemy szum: Szukamy SWAP, Zastrzyków płynności i Zasileń!
+            if tx_type in ["SWAP", "CREATE_POOL", "TRANSFER"] or source in ["RAYDIUM", "PUMP_FUN"]:
                 desc = tx.get("description", "Brak opisu transakcji")
+                
+                # Wyciągamy Token CA z transakcji
+                token_ca = ""
+                token_transfers = tx.get("tokenTransfers", [])
+                if token_transfers:
+                    for t in token_transfers:
+                        mint = t.get("mint", "")
+                        # Ignorujemy natywny SOL, by chwycić adres właściwego Memecoina
+                        if mint and mint != "So11111111111111111111111111111111111111112":
+                            token_ca = mint
+                            break
+                            
+                # Dodatkowa detekcja FUNDING (Zasilenie z giełdy przed pompą)
+                if tx_type == "TRANSFER":
+                    native_transfers = tx.get("nativeTransfers", [])
+                    is_funding = False
+                    for nt in native_transfers:
+                        if nt.get("toUserAccount") == wallet:
+                            amount_sol = nt.get("amount", 0) / 1e9
+                            is_funding = True
+                            desc = f"FUNDING: Płatność {amount_sol:.2f} SOL wpadła na wabika! Przygotuj się."
+                            
+                    if not is_funding:
+                        continue # To tylko zwykły przelew kogoś innego w tej samej sekundzie
+                    tx_type = "💰 ZASILENIE (FUNDING ALERT)"
+
+                if tx_type == "CREATE_POOL":
+                    tx_type = "🚀 CREATE POOL (ZASTRZYK PŁYNNOŚCI)"
+                
                 if is_prefill:
                     print(f"[PAMIĘĆ] Zapisano w historii (brak alertu TG): {tx_type} na {source}")
                 else:
                     print(f"[WYKRYTO] {wallet[:8]}... zrobił {tx_type} na {source}")
-                    send_telegram_alert(wallet, tx_type, sig, desc)
+                    send_telegram_alert(wallet, tx_type, sig, desc, token_ca)
                 
     except Exception as e:
         print(f"[BŁĄD API] Problem z portfelem {wallet}: {e}")
@@ -108,7 +142,7 @@ def main():
         targets = load_targets() # Przeładowujemy w locie, jakbyś dodał nowy portfel!
         for wallet in targets:
             check_wallet_activity(wallet)
-            time.sleep(1) # Małe opóźnienie, żeby nie zablokowali nam darmowego API
+            time.sleep(0.3) # Błyskawiczne przejście między portfelami 
             
         time.sleep(CHECK_INTERVAL)
 
